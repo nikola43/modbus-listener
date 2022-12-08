@@ -1,27 +1,356 @@
-
+use chrono::{DateTime, Local};
+use modbus::{Client, Config, Transport};
 use std::{thread, time::Duration};
+use web3::{contract::Contract, transports::Http, types::U256};
+use web3_rust_wrapper::Web3Manager;
+use std::time::{SystemTime, UNIX_EPOCH};
+#[tokio::main]
+async fn main() -> web3::Result<()> {
+    // init web3
+    let mut web3m: Web3Manager = Web3Manager::new_from_rpc_url(
+        "https://volta-rpc.energyweb.org",
+        "wss://volta-rpc.energyweb.org/ws",
+        73799,
+    )
+    .await;
+    web3m
+        .load_account(
+            "0xCEf095b6Ea31dbDd564515AEB0bDf979026Cc733",
+            "1e585cc0343ed7311b84b5f37b1b87db83b901efcc2bee21343fc2fc16d2f96a",
+        )
+        .await;
 
-fn main() {
-    use modbus::tcp;
-    use modbus::{Client};
+    // init contract
+    let contract_instance = init_contract(&web3m).await;
 
-    let mut cfg = tcp::Config::default();
-    cfg.tcp_port = 502;
-    cfg.modbus_uid = 1;
-    cfg.tcp_read_timeout = Option::from(Duration::from_secs(10));
-    cfg.tcp_connect_timeout = Option::from(Duration::from_secs(10));
-    // change cfg port to 502 // 0x7D42 = 32066
-    let mut client = tcp::Transport::new_with_cfg("192.168.8.101", cfg).unwrap();
-    println!("Connected");
-    thread::sleep(Duration::from_secs(2));
-    //println!("{:?}", client.    #Temperature 32087 0x7D57 1);
-    let data = client.read_holding_registers(0x7D57, 20); // 7D57
-    match data {
-        Ok(data) => {
-            println!("data: {:?}", data);
-        }
-        Err(e) => {
-            println!("error: {:?}", e);
+    // init modbus
+    let mut errors_count = 0;
+    let mut insert_data: Vec<U256> = Vec::new();
+
+    let mut init_datetime = chrono::Local::now();
+    println!("Init");
+    loop {
+        let current_datetime = chrono::Local::now();
+
+        let diff = get_difference_between_dates_in_minutes(init_datetime, current_datetime);
+
+        if diff > 60 {
+            let mut modbus_client = init_modbus_client("192.168.8.101", 502, 1);
+            thread::sleep(Duration::from_secs(2));
+            
+            // PV data
+            // PV1 voltage 10
+            let mut data = read_holding_registers(&mut modbus_client, 32016, 1);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                let pv1_voltage = data[0];
+                println!("raw: {:?}", data);
+                println!("PV1 voltage: {:?}", pv1_voltage as f32 / 10.0);
+                insert_data.push(U256::from(pv1_voltage));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // PV1 current 10
+            data = read_holding_registers(&mut modbus_client, 32017, 1);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                let pv1_current = data[0];
+                println!("raw: {:?}", data);
+                println!("PV1 current: {:?}\n", pv1_current as f32 / 100.0);
+                insert_data.push(U256::from(pv1_current));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Voltage ----------------------------------------------------
+            // PHASE A Voltage
+            data = read_holding_registers(&mut modbus_client, 32069, 1);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                let phase_a_voltage = data[0];
+                println!("raw: {:?}", data);
+                println!("Phase A voltage: {:?}", phase_a_voltage as f32 / 10.0);
+                insert_data.push(U256::from(phase_a_voltage));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Phase A current
+            data = read_holding_registers(&mut modbus_client, 32072, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                let phase_a_current = data[1];
+                println!("raw: {:?}", data);
+                println!("Phase A current: {:?}", phase_a_current as f32 / 1000.0);
+                insert_data.push(U256::from(phase_a_current));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Phase A power
+            data = read_holding_registers(&mut modbus_client, 37132, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                let phase_a_power = data[1];
+                println!("raw: {:?}", data);
+                println!("Phase A power: {:?}\n", phase_a_power as f32 / 1.0);
+                insert_data.push(U256::from(phase_a_power));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // PHASE B Voltage
+            data = read_holding_registers(&mut modbus_client, 32070, 1);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Phase B voltage: {:?}", data[0] as f32 / 10.0);
+                insert_data.push(U256::from(data[0]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Phase B current
+            data = read_holding_registers(&mut modbus_client, 32074, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Phase B current: {:?}", data[1] as f32 / 1000.0);
+                insert_data.push(U256::from(data[1]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Phase C power
+            data = read_holding_registers(&mut modbus_client, 37134, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                let phase_a_power = data[1];
+                println!("raw: {:?}", data);
+                println!("Phase B power: {:?}\n", phase_a_power as f32 / 1.0);
+                insert_data.push(U256::from(phase_a_power));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Phase C voltage
+            data = read_holding_registers(&mut modbus_client, 32071, 1);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Phase C voltage: {:?}", data[0] as f32 / 10.0);
+                insert_data.push(U256::from(data[0]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Phase C current
+            data = read_holding_registers(&mut modbus_client, 32076, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Phase C current: {:?}", data[1] as f32 / 1000.0);
+                insert_data.push(U256::from(data[1]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Phase C power
+            data = read_holding_registers(&mut modbus_client, 37136, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                let phase_a_power = data[1];
+                println!("raw: {:?}", data);
+                println!("Phase C power: {:?}\n", phase_a_power as f32 / 1.0);
+                insert_data.push(U256::from(phase_a_power));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Input power
+            data = read_holding_registers(&mut modbus_client, 32064, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Input power: {:?}", data[1] as f32 / 1000.0);
+                insert_data.push(U256::from(data[1]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Electricity fed by the inverter to the power grid.
+            data = read_holding_registers(&mut modbus_client, 37119, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Positive active electricity: {:?}", data[1] as f32 / 100.0);
+                insert_data.push(U256::from(data[1]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            //Power supplied to a distributed system from the power grid.
+            data = read_holding_registers(&mut modbus_client, 37121, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Reverse active power: {:?}", data[1] as f32 / 100.0);
+                insert_data.push(U256::from(data[1]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Energy ----------------------------------------------------
+            // Daily energy
+            data = read_holding_registers(&mut modbus_client, 32114, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Daily energy: {:?}", data[1] as f32 / 100.0);
+                insert_data.push(U256::from(data[1]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Accumulated energy yield
+            data = read_holding_registers(&mut modbus_client, 32106, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Accumulated energy: {:?}", data[1] as f32 / 100.0);
+                insert_data.push(U256::from(data[1]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // ----------------------------------------------------
+            // Active power - >0: feed-in to the power grid | <0: supply from the power grid. 37113 32080
+            data = read_holding_registers(&mut modbus_client, 37113, 2);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Active power: {:?}", data[1] as f32 / 1000.0);
+                let is_chargin = (data[1] as f32 / 1000.0) > 0.0;
+
+                if is_chargin {
+                    insert_data.push(U256::from(1));
+                } else {
+                    insert_data.push(U256::from(2));
+                }
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // More data ----------------------------------------------------
+            // Efficiency
+            data = read_holding_registers(&mut modbus_client, 32086, 1);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Efficiency: {:?}", data[0] as f32 / 100.0);
+                insert_data.push(U256::from(data[0]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            // Temperature
+            data = read_holding_registers(&mut modbus_client, 32087, 1);
+            if data.len() == 0 {
+                errors_count += 1;
+                insert_data.push(U256::from(0));
+            } else {
+                println!("raw: {:?}", data);
+                println!("Temperature: {:?}", data[0] as f32 / 10.0);
+                insert_data.push(U256::from(data[0]));
+            }
+            thread::sleep(Duration::from_secs(1));
+
+            let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            insert_data.push(U256::from(secs));
+
+            println!("errors_count: {}\n", errors_count);
+            println!("insert_data: {:?}\n", insert_data);
+
+            let contract_function = "insertInverterData";
+            let parameters = (web3m.first_loaded_account(), insert_data.clone());
+            let tx_result = &web3m
+                .sign_and_send_tx(
+                    web3m.first_loaded_account(),
+                    &contract_instance,
+                    &contract_function.to_string(),
+                    &parameters,
+                    U256::from_dec_str("0").unwrap(),
+                )
+                .await
+                .unwrap();
+
+            println!("tx_result: {:?}\n", tx_result);
+            init_datetime = chrono::Local::now();
+
+            insert_data.clear();
+            // await 2 seconds
+            thread::sleep(Duration::from_secs(2));
+            modbus_client.close().unwrap();
         }
     }
+
+    Ok(())
+}
+
+fn get_difference_between_dates_in_minutes(start: DateTime<Local>, end: DateTime<Local>) -> i64 {
+    let duration = end.signed_duration_since(start);
+    duration.num_minutes()
+}
+
+fn read_holding_registers(client: &mut Transport, address: u16, quantity: u16) -> Vec<u16> {
+    client
+        .read_holding_registers(address, quantity)
+        .unwrap_or_else(|e| {
+            println!("Error: {}", e);
+            vec![]
+        })
+}
+
+async fn init_contract(web3m: &Web3Manager) -> Contract<Http> {
+    let contract_abi = include_bytes!("../EnergySolar.json");
+    let contract_address = "0x6F77285f7d6fDdE173612366168EE5D62B6ddd73";
+    let contract_instance: Contract<Http> = web3m
+        .instance_contract(contract_address, contract_abi)
+        .await
+        .unwrap();
+    contract_instance
+}
+
+// function for init modbus client
+fn init_modbus_client(ip: &str, tcp_port: u16, uid: u8) -> modbus::Transport {
+    let mut cfg = Config::default();
+    cfg.tcp_port = tcp_port;
+    cfg.modbus_uid = uid;
+    cfg.tcp_read_timeout = Option::from(Duration::from_secs(10));
+    cfg.tcp_connect_timeout = Option::from(Duration::from_secs(10));
+    let client = Transport::new_with_cfg(ip, cfg);
+    if client.is_ok() {
+        println!("Connected");
+    }
+    thread::sleep(Duration::from_secs(2));
+    client.unwrap()
 }
